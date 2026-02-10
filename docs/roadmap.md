@@ -1,5 +1,139 @@
 ## MyCli 路线图（Roadmap）
 
+本路线图从一个完整的软件项目视角出发，围绕 MyCli 的 C/S 架构与核心链路：
+
+> 自然语言/Spec → Context → Plan → Patch → Git
+
+按「阶段 → 角色 → 产出」的方式拆解迭代步骤。
+
+---
+
+### 阶段 1：架构与领域模型定稿（主要是架构/后端角色）
+
+- **目标**
+  - 用文档和类型定义，把系统的「说法」统一起来。
+- **主要工作**
+  - 在 `docs/architecture/overview.md` 中：
+    - 固定 C/S 架构图（Client CLI/REPL + Server Core Engine + ModelGateway + GitAdapter）。
+  - 在 `docs/architecture/modules.md` 中：
+    - 定义核心服务：`ProjectService`、`SpecService`、`ContextService`、`PlanService`、`PatchService`、`ModelGateway`、`GitAdapter` 的职责；
+    - 给出领域对象：`Spec`、`Plan`、`Patch`、`Session`、`Project` 的字段/类型草案。
+  - 明确 Client ↔ Server 之间的调用接口（函数签名或未来可演进为 HTTP/gRPC 的契约）。
+- **完成标志**
+  - 不写任何代码，只看 README + vision + architecture 文档，就能画出自己的架构图和类型草图。
+
+---
+
+### 阶段 2：Server 核心骨架（后端 / Core Engine 角色）
+
+- **目标**
+  - 做出最小可运行的 Core Engine：不接真实模型，先用 mock 把链路打通。
+- **主要工作**
+  - 实现 `ProjectService`：
+    - 校验当前目录是否 Git 仓库；
+    - 提供读/写文件接口；
+    - 提供「当前分支、工作区是否干净」等状态查询接口。
+  - 实现 `SpecService`：
+    - 基于 YAML/JSON 解析最小 Spec（先支持 `goal`、`scope`、`constraints`、`context` 等基础字段）；
+    - 做基础校验并返回内部 `Spec` 对象。
+  - 实现 `ContextService`：
+    - 按 `Spec.scope` 列表，读取相关文件全文（暂不做精细片段选择）；
+    - 将结果以结构化形式返回。
+  - 实现 `PatchService` + `GitAdapter` 最小版本：
+    - 先用假 patch（如追加一行注释）验证 diff 打印与文件改写流程；
+    - 支持 dry-run（只打印 diff）和 apply（真改文件），但可以暂不自动 commit。
+- **完成标志**
+  - 能调用一组 Server API，在一个示例仓库中完成一次「假 patch」的应用和 diff 展示。
+
+---
+
+### 阶段 3：CLI & REPL 骨架（CLI & 交互角色）
+
+- **目标**
+  - 搭出和 Claude Code 类似的终端交互壳子：`mycli chat` / `mycli run`。
+- **主要工作**
+  - 在 CLI 层：
+    - 实现 `mycli chat` / `mycli repl`：进入 REPL 会话；
+    - 实现 `mycli run -s spec.yml`：一次性执行「读取 Spec → 调 Server → 打印 diff」流程。
+  - 在 REPL 内：
+    - 实现基础指令解析（`CommandParser`）：
+      - `:spec`：查看当前 Spec；
+      - `:plan`：生成 plan（此时仍可用 mock plan）；
+      - `:apply`：调用 `PatchService` 应用 patch；
+      - 其他文本按「自然语言意图」处理，先简单 echo 或打日志。
+  - 在输出渲染层（`ViewRenderer`）：
+    - 提供基础的 plan/diff/错误信息渲染。
+- **完成标志**
+  - 在一个示例仓库中，用户可以：
+    - 运行 `mycli chat`，敲入 `:plan` / `:apply` 等指令；
+    - 看到清晰的打印信息和（即便是假的）diff。
+
+---
+
+### 阶段 4：接入真实模型 & 打磨 Spec（LLM 集成 + 后端角色）
+
+- **目标**
+  - 用真实 LLM 替换 mock，让 MyCli 真正具备「理解需求 → 生成 patch」的能力。
+- **主要工作**
+  - 在 `docs/architecture/model-providers.md` 中：
+    - 固定 `ModelGateway` 接口：如 `generatePlanAndPatches(spec, context) -> Plan + Patch[]`；
+    - 约定 Provider 配置方式（环境变量 / 配置文件）。
+  - 实现 `ModelGateway`：
+    - 支持至少一个 Provider（如 Claude 或 OpenAI）；
+    - 处理超时、重试、错误信息回传。
+  - 实现 `PromptBuilder`：
+    - 将 `Spec` + `Context` 组织成稳定 Prompt 模板；
+    - 支持 debug 模式下打印 Prompt 便于调优。
+  - 改造 `PlanService`：
+    - 从调用 mock 改为调用真实 `ModelGateway`；
+    - 把模型输出解析成结构化 `Plan` 与 `Patch`。
+- **完成标志**
+  - 在一个小型真实项目上，按照 examples 中的示例：
+    - 写一份 Spec 或在 `mycli chat` 中下达一个简单需求；
+    - 工具能产出有意义的 plan 与 patch，并安全地在本地应用。
+
+---
+
+### 阶段 5：体验优化、Git 策略与测试（CLI + 测试角色）
+
+- **目标**
+  - 让 MyCli 从「能用」变成「敢用」「好用」。
+- **主要工作**
+  - Git 策略：
+    - 固化「每个 Spec / 任务对应一个原子 commit」的策略；
+    - 约定 commit message 格式（含 Spec 名称/ID、简要说明）。
+  - REPL 体验：
+    - 改进错误提示、确认提示、diff 高亮和分页；
+    - 增加常见快捷命令（如 `:help`、`:history` 等）。
+  - 测试与质量：
+    - 为 `Spec → Context → Plan → Patch → Git` 全链路增加集成测试；
+    - 为关键模块（SpecService、ContextService、PatchService、ModelGateway）增加单元测试；
+    - 为 CLI/REPL 流程设计端到端测试脚本。
+- **完成标志**
+  - 你愿意在自己日常的小需求上实际使用 MyCli，而不是只把它当 Demo。
+
+---
+
+### 阶段 6：示例、文档与未来演进（文档 + 产品化角色）
+
+- **目标**
+  - 让其他工程师可以轻松理解和上手 MyCli。
+- **主要工作**
+  - 示例：
+    - 在 `examples/README.md` 中列出示例场景（basic-refactor、add-feature、add-tests 等）；
+    - 为每个示例写清：初始状态 → 使用的 Spec/指令 → 预期改动。
+  - 文档：
+    - 在 README 中补充「从 0 到 1 教程」，指向某个具体 example；
+    - 在 `docs/cli/workflows.md` 中，用故事形式走一遍完整流程。
+  - 未来方向（可选）：
+    - 更智能的上下文选择（索引、语义搜索）；
+    - 更丰富的任务管理与多轮会话支持；
+    - 与 IDE、GitHub Apps 或自建平台的集成。
+- **完成标志**
+  - 一个第一次接触 MyCli 的工程师，按 README 操作一次，就能在本地跑通一个完整示例并大致读懂架构。
+
+## MyCli 路线图（Roadmap）
+
 本路线图聚焦于「复刻 Claude Code 核心编辑循环」这一目标，围绕 **Spec → Context → Prompt → Patch → Git** 的闭环，按阶段推进。
 
 > 当前阶段只在文档中记录路线图，代码实现会在文档稳定后逐步进行。
